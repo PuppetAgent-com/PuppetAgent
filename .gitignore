@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Data / runtime
+data/
+*.db
+*.db-wal
+*.db-shm
+/tmp/
+
+# Secrets / config (never commit real configs)
+*.conf
+.env
+*.env
+
+# MinIO data
+minio-data/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Android build artifacts
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+*.apk
+*.aab

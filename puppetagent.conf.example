@@ -1,0 +1,68 @@
+# puppetagent.conf — PuppetAgent configuration
+#
+# Copy this file to ~/.puppetagent/puppetagent.conf and edit for your machine.
+# Every value here can also be set as an environment variable, which takes
+# precedence over this file. That means Docker users can pass everything via
+# docker-compose.yml environment: without needing a config file at all.
+#
+# Config file location (in order of preference):
+#   1. Path in PUPPETAGENT_CONF env var
+#   2. ~/.puppetagent/puppetagent.conf       ← recommended for host installs
+#   3. /etc/puppetagent/puppetagent.conf     ← system-wide installs
+#
+# Run `python3 video-processor.py --check-config` to verify paths exist.
+
+# ── AI Tool Paths ──────────────────────────────────────────────────────────────
+#
+# PUPPETAGENT_CONDA_BASE: root directory of your conda/miniconda installation.
+# Used to locate: $CONDA_BASE/bin/conda  and  $CONDA_BASE/envs/<name>/bin/python
+#
+PUPPETAGENT_CONDA_BASE=/home/YOUR_USERNAME/miniconda3
+
+# Python interpreter inside the XTTS virtual environment.
+# Install: python3 -m venv ~/venvs/xtts && ~/venvs/xtts/bin/pip install TTS
+PUPPETAGENT_XTTS_PYTHON=/home/YOUR_USERNAME/venvs/xtts/bin/python
+
+# Directories where each tool is cloned/installed.
+PUPPETAGENT_MUSETALK_DIR=/home/YOUR_USERNAME/MuseTalk
+PUPPETAGENT_WAV2LIP_DIR=/home/YOUR_USERNAME/Wav2Lip
+PUPPETAGENT_FACEFUSION_DIR=/home/YOUR_USERNAME/facefusion
+
+# Directory containing the helper scripts (auto-edit.py, voice-enhance.py, etc.)
+# On a standard install this is the same directory as video-processor.py.
+PUPPETAGENT_SCRIPTS_DIR=/home/YOUR_USERNAME/scripts
+
+# ── Conda Environment Names ────────────────────────────────────────────────────
+# Names of conda environments created during tool installation.
+# Change these if you used different names during setup.
+PUPPETAGENT_MUSETALK_ENV=musetalk
+PUPPETAGENT_WAV2LIP_ENV=wav2lip
+PUPPETAGENT_FACEFUSION_ENV=facefusion
+
+# ── Influencer Assets ──────────────────────────────────────────────────────────
+# Root directory containing per-influencer subdirectories.
+# Expected layout: $INFLUENCER_BASE/<name>/{portrait.jpg, voice-sample.wav,
+#                  neutral-loop.mp4, background.png, ambient.wav}
+PUPPETAGENT_INFLUENCER_BASE=/home/YOUR_USERNAME/influencers
+
+# ── FaceFusion API ─────────────────────────────────────────────────────────────
+# Optional. If FaceFusion is running as a server (--server mode), set this URL.
+# If the API is unreachable, video-processor.py falls back to direct CLI invocation.
+PUPPETAGENT_FACEFUSION_API=http://localhost:7860
+
+# ── MinIO Video Storage ────────────────────────────────────────────────────────
+# S3-compatible object storage for raw, preview, and final video files.
+# MINIO_PUBLIC is the base URL browsers use to stream videos — must be
+# publicly reachable (or reachable from wherever you open the dashboard).
+PUPPETAGENT_MINIO_ENDPOINT=localhost:9004
+PUPPETAGENT_MINIO_ACCESS=minio_admin
+PUPPETAGENT_MINIO_SECRET=changeme
+PUPPETAGENT_MINIO_BUCKET=video-production
+PUPPETAGENT_MINIO_PUBLIC=https://studio.puppetagent.com/videos
+
+# ── Studio App ─────────────────────────────────────────────────────────────────
+# Path to video-processor.py on the machine that runs the studio (usually same host).
+PUPPETAGENT_PROCESSOR_SCRIPT=/home/YOUR_USERNAME/scripts/video-processor.py
+
+# Port the studio Flask app listens on.
+PUPPETAGENT_PORT=9005

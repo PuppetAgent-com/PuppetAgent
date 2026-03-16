@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PuppetAgent Studio</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <h1><span>PuppetAgent</span> Studio</h1>
+  <button class="btn btn-secondary btn-sm" id="btn-refresh" title="Refresh">⟳ Refresh</button>
+  <button class="btn btn-primary btn-sm" id="btn-upload">+ Upload</button>
+</div>
+
+<!-- Filter tabs -->
+<div class="filters">
+  <button class="filter-tab active" data-status="all">All</button>
+  <button class="filter-tab" data-status="uploaded">Uploaded</button>
+  <button class="filter-tab" data-status="stage1_running">Stage 1 Running</button>
+  <button class="filter-tab" data-status="awaiting_review">Awaiting Review</button>
+  <button class="filter-tab" data-status="stage2_running">Stage 2 Running</button>
+  <button class="filter-tab" data-status="done">Done</button>
+  <button class="filter-tab" data-status="error">Error</button>
+  <button class="filter-tab" data-status="rejected">Rejected</button>
+</div>
+
+<!-- Job list -->
+<div class="main">
+  <div id="job-list"></div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toasts"></div>
+
+<!-- Upload modal -->
+<div class="modal-overlay hidden" id="upload-modal">
+  <div class="modal">
+    <h2>Upload Video</h2>
+
+    <div class="form-group">
+      <label>Influencer</label>
+      <select id="up-influencer">
+        <option value="emma">Emma</option>
+        <option value="sarah">Sarah</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Title (optional)</label>
+      <input type="text" id="up-title" placeholder="e.g. Concrete 3D Printing 2026">
+    </div>
+
+    <div class="form-group">
+      <label>Video file</label>
+      <div class="drop-zone" id="drop-zone">
+        <p>Drop video here or click to browse</p>
+        <small>MP4, MOV, WebM · max 500 MB</small>
+        <input type="file" id="file-input" accept="video/*" style="display:none">
+      </div>
+    </div>
+
+    <label class="option-check" style="margin-bottom:14px">
+      <input type="checkbox" id="up-autostart" checked>
+      Start Stage 1 immediately after upload
+    </label>
+
+    <div class="upload-progress hidden" id="upload-progress">
+      <div class="upload-bar-wrap">
+        <div class="upload-bar" id="upload-bar" style="width:0%"></div>
+      </div>
+      <div class="upload-status" id="upload-status">Uploading…</div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="btn-cancel-upload">Cancel</button>
+      <button class="btn btn-primary" id="btn-confirm-upload" disabled>Upload</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

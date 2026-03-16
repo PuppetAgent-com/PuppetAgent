@@ -1,0 +1,25 @@
+services:
+  studio:
+    build: ./studio
+    ports: ["9005:9005"]
+    volumes:
+      - ./data:/app/data
+      - /tmp:/tmp
+    environment:
+      PUPPETAGENT_MINIO_ENDPOINT: minio:9000
+      PUPPETAGENT_MINIO_ACCESS: admin
+      PUPPETAGENT_MINIO_SECRET: changeme
+      PUPPETAGENT_MINIO_BUCKET: puppetagent
+      PUPPETAGENT_MINIO_PUBLIC: https://your-domain.com/videos
+      PUPPETAGENT_PROCESSOR_SCRIPT: /host-scripts/video-processor.py
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: changeme
+    volumes: [./minio-data:/data]
+    ports: ["9000:9000", "9001:9001"]
+    restart: unless-stopped
