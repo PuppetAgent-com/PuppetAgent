@@ -2,7 +2,7 @@
 """
 video-processor.py — Talking-head video production orchestrator.
 
-Runs on your host machine. Two-stage pipeline:
+Runs on your server. Two-stage pipeline:
   Stage 1 (--preview-only):  XTTS + FaceFusion + audio overlay (~5 min) → preview
   Stage 2 (--resume):        MuseTalk + gaze + bg + amix (~15-20 min) → final
 
@@ -11,7 +11,7 @@ Full single-pass (no flags):  All stages in sequence (~20-25 min)
 Usage — Pipeline A (autonomous, text script):
     python3 ~/scripts/video-processor.py \
         --influencer emma \
-        --script "Emma Howard reports on 3D concrete printing." \
+        --script "Christopher Howard reports on 3D concrete printing." \
         --job-id test-001 --output /tmp/test-001-final.mp4
 
 Usage — Pipeline B (user video, voice clone):
@@ -101,6 +101,38 @@ VOICE_ENHANCE_SCRIPT = SCRIPTS_DIR / "voice-enhance.py"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+def _probe_frames(video_path: str) -> int:
+    import subprocess as _sp
+    try:
+        r = _sp.run(["ffprobe","-v","quiet","-select_streams","v:0","-count_frames","-show_entries","stream=nb_read_frames","-of","csv=p=0",str(video_path)],capture_output=True,text=True,timeout=30)
+        v = r.stdout.strip()
+        return int(v) if v.isdigit() else 0
+    except Exception:
+        return 0
+
+
+def _progress_ticker(job: str, step: str, pct_start: int, pct_end: int,
+                     expected_s: float, stage: int = 1):
+    """Return (stop_event, thread). Write progress every 20s during a blocking call.
+    Caller must set stop_event when the blocking call finishes.
+    """
+    import threading as _th, time as _tm
+    stop = _th.Event()
+    def _run():
+        t0 = _tm.time()
+        while not stop.wait(timeout=15):
+            elapsed = _tm.time() - t0
+            pct = min(pct_end - 2,
+                      int(pct_start + (elapsed / max(expected_s, 1)) * (pct_end - pct_start)))
+            mins, secs = divmod(int(elapsed), 60)
+            write_progress(job, step, pct,
+                           f"{step.replace("_"," ").title()}: {mins}m{secs:02d}s elapsed…",
+                           stage=stage)
+    t = _th.Thread(target=_run, daemon=True)
+    t.start()
+    return stop, t
+
+
 def log(msg: str):
     print(f"[video-processor {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -160,8 +192,9 @@ def compress_for_processing(video_in: str, video_out: str):
          video_out])
 
 
-def maybe_compress(video_in: str, job: str) -> str:
-    """Return compressed path if video exceeds MAX_FRAMES_BEFORE_COMPRESS, else original."""
+def maybe_compress(video_in: str, job: str, force: bool = False) -> str:
+    """Return compressed path if video exceeds MAX_FRAMES_BEFORE_COMPRESS, else original.
+    Pass force=True to always compress regardless of frame count (e.g. --preview-only)."""
     import subprocess as _sp
     r = _sp.run(["ffprobe", "-v", "quiet", "-show_entries", "stream=nb_frames,r_frame_rate",
                  "-select_streams", "v:0", "-of", "default=noprint_wrappers=1", video_in],
@@ -179,29 +212,42 @@ def maybe_compress(video_in: str, job: str) -> str:
             if line.startswith("duration="):
                 try: frames = int(float(line.split("=")[1]) * 30)
                 except: pass
-    if frames > MAX_FRAMES_BEFORE_COMPRESS:
-        log(f"  Video has ~{frames} frames — compressing before processing")
+    if force or frames > MAX_FRAMES_BEFORE_COMPRESS:
+        reason = "preview-only mode" if force else f"~{frames} frames"
+        log(f"  Compressing to 720p ({reason})")
         compressed = f"/tmp/{job}-compressed.mp4"
         compress_for_processing(video_in, compressed)
         return compressed
     return video_in
 
 
-def auto_edit_video(video_in: str, video_out: str, transcript_json: str = None) -> str:
+def auto_edit_video(video_in: str, video_out: str, transcript_json: str = None,
+                    srt_path: str = None, context_file: str = None) -> str:
     """Remove silences and repeated takes from raw recording.
 
     Runs auto-edit.py (in xtts venv, which has Whisper).
     Saves transcript JSON so XTTS clone can skip re-transcription.
+    Saves SRT subtitle file with remapped timestamps if srt_path is given.
+    context_file: JSON with {vosk_transcript, script_lines} from the teleprompter app.
     Returns edited video path, or original if auto-edit fails.
     """
     log(f"Step 0: Auto-edit {Path(video_in).name} → {Path(video_out).name}")
-    args = [video_in, video_out]
+    cmd = [XTTS_PYTHON, str(AUTO_EDIT_SCRIPT),
+           "--input",  video_in,
+           "--output", video_out]
     if transcript_json:
-        args.append(transcript_json)
+        cmd += ["--transcript", transcript_json]
+    if srt_path:
+        cmd += ["--srt", srt_path]
+    if context_file and Path(context_file).exists():
+        cmd += ["--context", context_file]
+        log("  Using teleprompter context (Vosk transcript + script lines)")
     try:
-        run([XTTS_PYTHON, str(AUTO_EDIT_SCRIPT)] + args, timeout=1800)
+        run(cmd, timeout=1800)
         if Path(video_out).exists() and Path(video_out).stat().st_size > 100_000:
             log(f"  Auto-edit done: {Path(video_out).stat().st_size // (1024*1024)} MB")
+            if srt_path and Path(srt_path).exists():
+                log(f"  SRT generated: {Path(srt_path).stat().st_size} bytes")
             return video_out
         log("  WARNING: Auto-edit output missing or too small — using original")
     except Exception as e:
@@ -209,13 +255,59 @@ def auto_edit_video(video_in: str, video_out: str, transcript_json: str = None) 
     return video_in
 
 
+def burn_captions(video_in: str, video_out: str, srt_path: str, style: str,
+                  caption_x: float = 50.0, caption_y: float = 85.0,
+                  caption_size: str = "medium"):
+    """Burn SRT captions into video using FFmpeg subtitles filter.
+
+    style:       'clean' | 'bold' | 'gray'
+    caption_x:   horizontal position % from left (0-100) — stored but burn-in is always centered
+    caption_y:   vertical position % from top (0-100) → controls MarginV
+    caption_size: 'small' | 'medium' | 'large' → maps to FontSize 18/22/28
+    """
+    SIZE_MAP = {"small": 18, "medium": 22, "large": 28}
+    fontsize = SIZE_MAP.get(caption_size, 22)
+
+    # Probe video height so we can compute MarginV in pixels
+    try:
+        r2 = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+             "-show_entries", "stream=height", "-of", "csv=p=0", video_in],
+            capture_output=True, text=True, timeout=10)
+        vid_height = int(r2.stdout.strip()) if r2.stdout.strip().isdigit() else 720
+    except Exception:
+        vid_height = 720
+
+    # MarginV: distance from bottom edge.
+    # caption_y=85 → 85% from top → 15% from bottom → MarginV = 0.15 * height
+    margin_v = max(10, int((1.0 - caption_y / 100.0) * vid_height))
+
+    STYLES = {
+        "clean": f"FontName=Arial,FontSize={fontsize},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=1,Shadow=0,Alignment=2,MarginV={margin_v}",
+        "bold":  f"FontName=Arial,FontSize={fontsize},Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=3,Shadow=0,Alignment=2,MarginV={margin_v}",
+        "gray":  f"FontName=Arial,FontSize={fontsize},PrimaryColour=&H00CCCCCC,OutlineColour=&H00000000,Outline=1,Shadow=0,Alignment=2,MarginV={margin_v}",
+    }
+    force_style = STYLES.get(style, STYLES["clean"])
+    # Escape the srt path for FFmpeg filter (no shell — colons in /tmp paths are fine on Linux)
+    vf = f"subtitles={srt_path}:force_style='{force_style}'"
+    log(f"Step 7: Caption burn-in [{style}, size={caption_size}, y={caption_y:.0f}%, MarginV={margin_v}px] → {Path(video_out).name}")
+    r = run(["ffmpeg", "-y", "-i", video_in,
+             "-vf", vf,
+             "-c:v", "libx264", "-crf", "20", "-preset", "fast",
+             "-c:a", "aac", "-b:a", "128k",
+             video_out], check=False)
+    if r.returncode != 0 or not Path(video_out).exists():
+        log(f"  WARNING: Caption burn-in failed (exit {r.returncode}) — using uncaptioned video")
+        shutil.copy2(video_in, video_out)
+
+
 def overlay_audio(video_in: str, audio_in: str, output: str):
     """Combine face-swapped video with audio (no lip sync — for preview)."""
     run(["ffmpeg", "-y",
          "-i", video_in, "-i", audio_in,
-         "-c:v", "copy", "-c:a", "aac",
+         "-c:v", "libx264", "-crf", "23", "-preset", "medium", "-c:a", "aac", "-b:a", "128k",
          "-map", "0:v:0", "-map", "1:a:0",
-         "-shortest", output])
+         "-shortest", "-movflags", "+faststart", output])
 
 
 def extract_audio(video_in: str, audio_out: str):
@@ -342,7 +434,8 @@ def enhance_voice(video_in: str, output_wav: str):
 # ── Step 2: FaceFusion ────────────────────────────────────────────────────────
 
 def facefusion_swap(source_face: str, target_video: str, output_video: str,
-                    preset: str = "good"):
+                    preset: str = "good",
+                    face_mask_blur: float = 0.3, face_mask_type: str = "box"):
     log(f"Step 2: FaceFusion [{preset}] → {output_video}")
     import urllib.request as _ur
     payload = json.dumps({"source": source_face, "target": target_video,
@@ -350,6 +443,9 @@ def facefusion_swap(source_face: str, target_video: str, output_video: str,
                           "enhancer_blend": 80}).encode()
     req = _ur.Request(f"{FACEFUSION_API}/swap", data=payload,
                       headers={"Content-Type": "application/json"}, method="POST")
+    # Estimate duration: ~2s per frame on CPU 780M
+    _total_f = _probe_frames(target_video)
+    _expected_s = max(_total_f * 2.0, 60) if _total_f else 300
     try:
         with _ur.urlopen(req, timeout=7200) as resp:
             result = json.loads(resp.read())
@@ -358,13 +454,15 @@ def facefusion_swap(source_face: str, target_video: str, output_video: str,
         # API down — fallback to direct CLI (no enhancer for fast/good presets in preview)
         enhance_cli = preset in ("best", "hq")
         log(f"  FaceFusion API error: {e} — CLI fallback (enhance={enhance_cli})")
-        _facefusion_cli(source_face, target_video, output_video, enhance=enhance_cli)
+        _facefusion_cli(source_face, target_video, output_video, enhance=enhance_cli,
+                        face_mask_blur=face_mask_blur, face_mask_type=face_mask_type)
 
     if not Path(output_video).exists():
         raise RuntimeError(f"FaceFusion output missing: {output_video}")
 
 
-def _facefusion_cli(source: str, target: str, output: str, enhance: bool = False):
+def _facefusion_cli(source: str, target: str, output: str, enhance: bool = False,
+                    face_mask_blur: float = 0.3, face_mask_type: str = "box"):
     """Fallback: run FaceFusion directly via its headless CLI.
 
     enhance=False (default) — face_swapper only, fast (~2 min/min-of-video on CPU).
@@ -414,7 +512,7 @@ def musetalk_sync(video_in: str, audio_in: str, output_video: str, job: str):
            "--use_saved_coord", "--saved_coord"]  # cache face detection pkl for re-runs
 
     r = run(cmd, check=False, cwd=str(MUSETALK_DIR),
-            env={"PYTHONPATH": str(MUSETALK_DIR)}, timeout=14400)  # 4h — CPU is slow
+            env={"PYTHONPATH": str(MUSETALK_DIR)}, timeout=86400)  # 24h — 780M iGPU is slow
 
     # Locate output — MuseTalk saves to result_dir/task_0.mp4
     candidates = [Path(result_dir) / "task_0.mp4"] + \
@@ -487,7 +585,7 @@ def amix_ambient(video_in: str, ambient_wav: str, video_out: str,
          "-filter_complex",
          f"[1:a]volume={vol}[amb];[0:a][amb]amix=inputs=2:duration=first[aout]",
          "-map", "0:v", "-map", "[aout]",
-         "-c:v", "copy", "-c:a", "aac", "-shortest", video_out])
+         "-c:v", "libx264", "-crf", "23", "-preset", "medium", "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", video_out])
 
 
 # ── Stage helpers ─────────────────────────────────────────────────────────────
@@ -519,9 +617,14 @@ def stage1(args, infl_dir, job, pipeline_a, pipeline_b):
             write_progress(job, "auto_edit", 5, "Removing silences and repeated takes…", stage=1)
             edited_path     = f"/tmp/{job}-edited.mp4"
             transcript_json = f"/tmp/{job}-transcript.json"
-            target_video    = auto_edit_video(args.input_video, edited_path, transcript_json)
+            srt_path        = f"/tmp/{job}-subs.srt"
+            ctx_file        = getattr(args, "context_file", None)
+            target_video    = auto_edit_video(args.input_video, edited_path,
+                                              transcript_json, srt_path, ctx_file)
             if not Path(transcript_json).exists():
                 transcript_json = None  # auto-edit failed, will re-transcribe in XTTS
+            if not Path(srt_path).exists():
+                srt_path = None
             write_progress(job, "auto_edit", 12, "Auto-edit complete", stage=1)
 
         if args.clone_voice:
@@ -535,14 +638,66 @@ def stage1(args, infl_dir, job, pipeline_a, pipeline_b):
             extract_audio(target_video, voice_wav)
             write_progress(job, "voice_enhance", 22, "Audio extracted", stage=1)
 
-        # Compress long videos before FaceFusion (>80s → 720p@15fps)
-        target_video = maybe_compress(target_video, job)
+        # Compress before FaceFusion; always compress in preview-only mode for speed
+        target_video = maybe_compress(target_video, job, force=args.preview_only)
+
+    # RVC voice conversion (optional)
+    voice_conv_model = getattr(args, "voice_conv", "none") or "none"
+    if voice_conv_model != "none":
+        rvc_out = f"/tmp/{job}-voice-rvc.wav"
+        rvc_py  = str(Path.home() / "venvs/rvc/bin/python")
+        rvc_script = str(Path.home() / "scripts/rvc-infer.py")
+        log(f"  RVC voice conversion: {voice_conv_model}")
+        rvc_cmd = [rvc_py, rvc_script,
+                   "--input", voice_wav, "--output", rvc_out,
+                   "--model", voice_conv_model]
+        import subprocess as _subp
+        r = _subp.run(rvc_cmd, capture_output=True, text=True, timeout=300)
+        if r.returncode == 0 and Path(rvc_out).exists():
+            voice_wav = rvc_out
+            write_progress(job, "voice_conv", 24, "RVC voice conversion complete", stage=1)
+        else:
+            log(f"  WARNING: RVC conversion failed: {r.stderr[-300:]} — keeping original voice")
+            log("  Voice conversion skipped — using original")
 
     write_progress(job, "face_swap", 25, "Starting FaceFusion…", stage=1)
     # Preview uses "fast" preset (no codeformer enhancer) — enhancer runs in Stage 2
     preview_preset = "fast" if args.preview_only else args.facefusion_preset
-    facefusion_swap(portrait, target_video, swap_out, preview_preset)
-    write_progress(job, "face_swap", 88, "Face swap complete", stage=1)
+    face_mode = getattr(args, "face_mode", "facefusion") or "facefusion"
+    if face_mode == "liveportrait":
+        portrait_img = str(Path.home() / "influencers" / args.influencer / "portrait.jpg")
+        write_progress(job, "face_swap", 30, "Starting LivePortrait animation…", stage=1)
+        lp_py = str(Path.home() / "venvs/liveportrait/bin/python")
+        lp_script = str(Path.home() / "scripts/liveportrait-infer.py")
+        import subprocess as _subp2
+        _lp_f   = _probe_frames(target_video)
+        _lp_exp = max(_lp_f * 0.5, 60) if _lp_f else 120
+        _lp_stop, _lp_t = _progress_ticker(job, "face_swap", 30, 87, _lp_exp, stage=1)
+        try:
+            r2 = _subp2.run([lp_py, lp_script,
+                             "--source", portrait_img, "--driver", target_video,
+                             "--output", swap_out],
+                            capture_output=True, text=True, timeout=3600)
+        finally:
+            _lp_stop.set(); _lp_t.join(timeout=1)
+        if r2.returncode != 0:
+            raise RuntimeError(f"LivePortrait failed: {r2.stderr[-300:]}")
+        write_progress(job, "face_swap", 88, "LivePortrait done", stage=1)
+    elif face_mode == "none":
+        import shutil as _sh_nm; _sh_nm.copy2(target_video, swap_out)
+        write_progress(job, "face_swap", 88, "Face swap skipped (mode=none)", stage=1)
+    else:
+        mask_blur = getattr(args, "face_mask_blur", 0.3)
+        mask_type = getattr(args, "face_mask_type", "box")
+        _total_f2 = _probe_frames(target_video)
+        _exp_s2   = max(_total_f2 * 2.0, 60) if _total_f2 else 300
+        _stop2, _t2 = _progress_ticker(job, "face_swap", 25, 87, _exp_s2, stage=1)
+        try:
+            facefusion_swap(portrait, target_video, swap_out, preview_preset,
+                            face_mask_blur=mask_blur, face_mask_type=mask_type)
+        finally:
+            _stop2.set(); _t2.join(timeout=1)
+        write_progress(job, "face_swap", 88, "Face swap complete", stage=1)
 
     write_progress(job, "overlay", 92, "Overlaying audio…", stage=1)
     # Overlay audio on face-swapped video (no lip sync — for preview)
@@ -556,6 +711,37 @@ def stage1(args, infl_dir, job, pipeline_a, pipeline_b):
     log(f"=== Stage 1 (preview) complete → {final_out} ===")
     log(f"    Size: {Path(final_out).stat().st_size // 1024} KB")
     log(f"    Sentinel: /tmp/{job}.preview_done")
+
+
+def recut_video(raw_mp4: str, cuts_path: str, output: str):
+    """Re-cut raw video using [[start,end],...] intervals JSON. Used at Stage 2 start
+    when agent or reviewer changed the cut list after Stage 1."""
+    import json as _jrc, tempfile as _trc
+    intervals = _jrc.loads(Path(cuts_path).read_text())
+    n = len(intervals)
+    if n == 0:
+        shutil.copy2(raw_mp4, output)
+        log("recut_video: empty intervals — copying raw unchanged")
+        return
+    parts = []
+    for i, (s, e) in enumerate(intervals):
+        parts.append(f"[0:v]trim=start={float(s):.4f}:end={float(e):.4f},setpts=PTS-STARTPTS[v{i}];")
+        parts.append(f"[0:a]atrim=start={float(s):.4f}:end={float(e):.4f},asetpts=PTS-STARTPTS[a{i}];")
+    va = "".join(f"[v{i}][a{i}]" for i in range(n))
+    parts.append(f"{va}concat=n={n}:v=1:a=1[outv][outa]")
+    fc_tmp = Path(_trc.mktemp(suffix=".txt"))
+    fc_tmp.write_text("".join(parts))
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-i", raw_mp4,
+         "-filter_complex_script", str(fc_tmp),
+         "-map", "[outv]", "-map", "[outa]",
+         "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+         "-c:a", "aac", "-b:a", "128k", output],
+        capture_output=True, text=True, timeout=300)
+    fc_tmp.unlink(missing_ok=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"recut_video ffmpeg failed:\n{r.stderr[-500:]}")
+    log(f"recut_video: {n} intervals → {output} ({Path(output).stat().st_size//1024}KB)")
 
 
 def stage2(args, infl_dir, job):
@@ -583,11 +769,39 @@ def stage2(args, infl_dir, job):
     if not Path(voice_wav).exists():
         sys.exit(f"ERROR: Stage 1 voice file not found: {voice_wav}")
 
+    # If --cuts-file was provided, re-cut raw video and re-run FaceFusion so
+    # Stage 2 operates on the user/agent-adjusted cut version, not Stage 1's cut.
+    cuts_file = getattr(args, "cuts_file", None)
+    if cuts_file and Path(cuts_file).exists():
+        raw_mp4 = f"/tmp/{job}-raw.mp4"
+        if not Path(raw_mp4).exists():
+            log(f"WARNING: --cuts-file given but raw video missing at {raw_mp4} — skipping recut")
+        else:
+            log(f"=== Recut: applying agent/reviewer cuts from {cuts_file} ===")
+            recut_out = f"/tmp/{job}-recut.mp4"
+            recut_video(raw_mp4, cuts_file, recut_out)
+            portrait_path = str(infl_dir / "portrait.jpg")
+            log("=== Re-running FaceFusion on recut video ===")
+            facefusion_swap(portrait_path, recut_out, swap_out,
+                            getattr(args, "facefusion_preset", "good") or "good", job)
+            Path(recut_out).unlink(missing_ok=True)
+            log("Face swap on recut video complete — continuing Stage 2")
+
     write_progress(job, "start", 0, "Stage 2 starting…", stage=2)
 
     # Step 3: MuseTalk lip sync
     write_progress(job, "lip_sync", 5, "Starting MuseTalk lip sync…", stage=2)
-    musetalk_sync(swap_out, voice_wav, sync_out, job)
+    if getattr(args, "no_musetalk", False):
+        import shutil as _sh_mt; _sh_mt.copy2(swap_out, sync_out)
+        write_progress(job, "lip_sync", 60, "MuseTalk skipped", stage=2)
+    else:
+        _mt_frames = _probe_frames(swap_out)
+        _mt_exp    = max(_mt_frames * 8.0, 300) if _mt_frames else 1800
+        _mt_stop, _mt_t = _progress_ticker(job, "lip_sync", 5, 49, _mt_exp, stage=2)
+        try:
+            musetalk_sync(swap_out, voice_wav, sync_out, job)
+        finally:
+            _mt_stop.set(); _mt_t.join(timeout=1)
     write_progress(job, "lip_sync", 50, "Lip sync complete", stage=2)
 
     # Step 4: Gaze correction
@@ -612,10 +826,26 @@ def stage2(args, infl_dir, job):
 
     # Step 6: Amix ambient
     write_progress(job, "amix", 87, "Mixing ambient audio…", stage=2)
+    amix_out = final_out if not getattr(args, "caption_style", "none") or args.caption_style == "none" else f"/tmp/{job}-amixed.mp4"
     if Path(ambient_wav).exists():
-        amix_ambient(bg_out, ambient_wav, final_out)
+        amix_ambient(bg_out, ambient_wav, amix_out)
     else:
-        shutil.copy2(bg_out, final_out)
+        shutil.copy2(bg_out, amix_out)
+
+    # Step 7: Caption burn-in (optional)
+    caption_style = getattr(args, "caption_style", "none") or "none"
+    srt_path      = f"/tmp/{job}-subs.srt"
+    if caption_style != "none" and Path(srt_path).exists():
+        write_progress(job, "amix", 92, f"Burning captions [{caption_style}]…", stage=2)
+        cx = getattr(args, "caption_x",    50.0)
+        cy = getattr(args, "caption_y",    85.0)
+        cs = getattr(args, "caption_size", "medium")
+        burn_captions(amix_out, final_out, srt_path, caption_style, cx, cy, cs)
+        if amix_out != final_out:
+            Path(amix_out).unlink(missing_ok=True)
+    elif amix_out != final_out:
+        shutil.copy2(amix_out, final_out)
+        Path(amix_out).unlink(missing_ok=True)
 
     if not Path(final_out).exists():
         raise RuntimeError(f"Stage 2 output missing: {final_out}")
@@ -662,17 +892,69 @@ def main():
     ap.add_argument("--no-gaze",      action="store_true")
     ap.add_argument("--no-auto-edit", action="store_true",
                     help="Skip silence removal and repeated take detection (Pipeline B only)")
+    ap.add_argument("--context-file", dest="context_file", default=None,
+                    help="JSON file with {vosk_transcript, script_lines} from teleprompter app")
     ap.add_argument("--pitch", type=float, default=0.82,
                     help="Pitch ratio for voice shift (default 0.82 ≈ 3 semitones lower)")
 
+    # Caption burn-in
+    ap.add_argument("--caption-style", default="none",
+                    choices=["none", "clean", "bold", "gray"],
+                    help="Burn captions into final video (Stage 2 only). none = no captions.")
+    ap.add_argument("--caption-x", type=float, default=50.0,
+                    help="Caption horizontal center as %% from left (0-100); stored, burn-in is always h-centered")
+    ap.add_argument("--caption-y", type=float, default=85.0,
+                    help="Caption vertical center as %% from top (0-100) → controls MarginV in burn-in")
+    ap.add_argument("--caption-size", default="medium",
+                    choices=["small", "medium", "large"],
+                    help="Caption font size: small=18px, medium=22px, large=28px")
+
+    # Face processing options
+    ap.add_argument("--face-model",    default="hyperswap_1a",
+                    choices=["hyperswap_1a","hyperswap_1b","hyperswap_1c","inswapper_128_fp16"],
+                    help="FaceFusion swap model")
+    ap.add_argument("--face-enhancer", default="none",
+                    choices=["none","codeformer","gfpgan"],
+                    help="Post-process enhancer after face swap")
+    ap.add_argument("--face-mode",    default="facefusion",
+                    choices=["facefusion","liveportrait","none"],
+                    help="Face processing mode")
+    ap.add_argument("--face-mask-blur", type=float, default=0.3,
+                    help="FaceFusion mask edge softness 0.0-1.0")
+    ap.add_argument("--face-mask-type", default="box",
+                    choices=["box","occlusion"],
+                    help="FaceFusion mask type")
+    ap.add_argument("--face-animate",  default="none",
+                    help="Portrait image for LivePortrait animation (or 'none')")
+
+    # Voice conversion
+    ap.add_argument("--voice-conv", default="none",
+                    help="RVC model name from ~/models/rvc/ (or 'none')")
+
+    # Stage 2 skips
+    ap.add_argument("--no-musetalk", action="store_true",
+                    help="Skip MuseTalk lip-sync in Stage 2")
+    ap.add_argument("--no-noise-reduce", action="store_true",
+                    help="Skip temporal denoising pass")
+
+    # Post-processing
+    ap.add_argument("--color-grade", default="none",
+                    choices=["none","cinematic","warm","cool"],
+                    help="Colour grading LUT (Stage 2)")
+    ap.add_argument("--captions", default="none",
+                    choices=["none","bottom","top"],
+                    help="Caption burn-in position (Stage 2)")
+
     # Review feedback (written by telegram-video-handler after dashboard rating)
     ap.add_argument("--review-file",  help="Path to JSON file with rating/comment from reviewer")
+    ap.add_argument("--cuts-file",    default=None,
+                    help="JSON [[start,end],...] intervals to recut raw video at Stage 2 start")
 
     # Config check (self-hosting setup verification)
     ap.add_argument("--check-config", action="store_true",
                     help="Verify all configured paths exist and print config summary")
 
-    args = ap.parse_args()
+    args, _unknown = ap.parse_known_args()
 
     # Config check mode — print summary and exit
     if args.check_config:

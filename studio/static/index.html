@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PuppetAgent Studio</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=6">
 </head>
 <body>
 
@@ -12,12 +12,14 @@
 <div class="header">
   <h1><span>PuppetAgent</span> Studio</h1>
   <button class="btn btn-secondary btn-sm" id="btn-refresh" title="Refresh">⟳ Refresh</button>
+  <button class="btn btn-secondary btn-sm" id="btn-create">✎ New Script</button>
   <button class="btn btn-primary btn-sm" id="btn-upload">+ Upload</button>
 </div>
 
 <!-- Filter tabs -->
 <div class="filters">
   <button class="filter-tab active" data-status="all">All</button>
+  <button class="filter-tab" data-status="queued">Queued</button>
   <button class="filter-tab" data-status="uploaded">Uploaded</button>
   <button class="filter-tab" data-status="stage1_running">Stage 1 Running</button>
   <button class="filter-tab" data-status="awaiting_review">Awaiting Review</button>
@@ -43,8 +45,8 @@
     <div class="form-group">
       <label>Influencer</label>
       <select id="up-influencer">
-        <option value="emma">Emma</option>
-        <option value="sarah">Sarah</option>
+        <option value="emma">Christopher</option>
+        <option value="sarah">Josh</option>
       </select>
     </div>
 
@@ -61,6 +63,11 @@
         <input type="file" id="file-input" accept="video/*" style="display:none">
       </div>
     </div>
+
+    <div id="up-link-notice" class="hidden" style="background:#1e3a1e;border:1px solid #3a5a3a;border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:#86efac;">
+      Linking video to queued job: <strong id="up-link-title"></strong>
+    </div>
+    <input type="hidden" id="up-link-job-id" value="">
 
     <label class="option-check" style="margin-bottom:14px">
       <input type="checkbox" id="up-autostart" checked>
@@ -81,6 +88,53 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<!-- Create Script modal -->
+<div class="modal-overlay hidden" id="create-modal">
+  <div class="modal">
+    <h2>New Script Job</h2>
+
+    <div class="form-group">
+      <label>Influencer</label>
+      <select id="cr-influencer">
+        <option value="emma">Christopher</option>
+        <option value="sarah">Josh</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Title (optional)</label>
+      <input type="text" id="cr-title" placeholder="e.g. Concrete 3D Printing 2026">
+    </div>
+
+    <div class="form-group">
+      <label>Script</label>
+      <textarea id="cr-script" rows="10" placeholder="Paste the teleprompter script here…" style="width:100%;box-sizing:border-box;background:#111;color:#e5e7eb;border:1px solid #374151;border-radius:6px;padding:10px;font-size:13px;line-height:1.6;resize:vertical;"></textarea>
+    </div>
+
+    <label class="option-check" style="margin-bottom:14px">
+      <input type="checkbox" id="cr-push-teleprompter" checked>
+      Push to teleprompter immediately
+    </label>
+
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="btn-cancel-create">Cancel</button>
+      <button class="btn btn-primary" id="btn-confirm-create">Create Job</button>
+    </div>
+  </div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div class="modal-overlay hidden" id="delete-modal">
+  <div class="modal" style="max-width:400px">
+    <h2 style="color:#fca5a5">Delete Job</h2>
+    <p id="delete-modal-msg" style="margin:12px 0 20px;color:#ccc;line-height:1.5"></p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="btn-cancel-delete">Cancel</button>
+      <button class="btn btn-danger" id="btn-confirm-delete">Delete permanently</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js?v=6"></script>
 </body>
 </html>
