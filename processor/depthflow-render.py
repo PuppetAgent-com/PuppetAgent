@@ -2,7 +2,7 @@
 """
 depthflow-render.py — Render a parallax/3D-Ken-Burns video from a single image using DepthFlow.
 
-Uses DepthAnything V1 (da1) as the depth estimator — fastest option (~6-11s per image),
+Uses DepthAnything V2 small (da2-small) as the depth estimator — fast (~10-15s per image),
 sufficient quality for b-roll use.
 
 Usage:
@@ -65,10 +65,10 @@ def download_image(url: str, dest: Path):
 
 
 def render_depthflow(image_path: str, output_mp4: str, duration: int, height: int):
-    """Run DepthFlow da1 estimator and render parallax video."""
+    """Run DepthFlow da2-small estimator and render parallax video."""
     cmd = [
         DEPTHFLOW_BIN,
-        "da1",
+        "da2", "--model", "small",
         "input", "-i", image_path,
         "main",
         "-o", output_mp4,
@@ -116,7 +116,7 @@ def main():
 
         # ── 2. Render with DepthFlow ──────────────────────────────────────────
         out_mp4 = tmp / f"{args.slug}.mp4"
-        print(f"Rendering with DepthFlow da1 → {out_mp4}", file=sys.stderr)
+        print(f"Rendering with DepthFlow da2-small → {out_mp4}", file=sys.stderr)
         log = render_depthflow(str(img_path), str(out_mp4), args.time, args.height)
         print(log, file=sys.stderr)
 
@@ -139,7 +139,7 @@ def main():
             "size_kb": size_kb,
             "duration": args.time,
             "height": args.height,
-            "estimator": "da1",
+            "estimator": "da2-small",
         }]
         print(json.dumps(manifest))
 
